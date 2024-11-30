@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
+import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:just_audio/just_audio.dart';
 
 void main() {
   runApp(const MyApp());
@@ -13,122 +16,106 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '○度寝目覚まし',
+      title: '○度寝目覚まし⏰',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
-      home: const MyHomePage(title: '○度寝目覚まし⏰'),
+      home: const MyHomePage(),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  final String title;
+  const MyHomePage({super.key});
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
 class _MyHomePageState extends State<MyHomePage> {
+  static const String wakeUpHourKey = 'wake_up_hour';
+  static const String wakeUpMinuteKey = 'wake_up_minute';
+  static const String finalAlarmHourKey = 'final_alarm_hour';
+  static const String finalAlarmMinuteKey = 'final_alarm_minute';
+  static const String intervalMinutesKey = 'interval_minutes';
+
   TimeOfDay? wakeUpTime;
   TimeOfDay? finalAlarmTime;
   List<TimeOfDay> alarmTimes = [];
   int intervalMinutes = 5;
-  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = 
-    FlutterLocalNotificationsPlugin();
+
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
   @override
   void initState() {
     super.initState();
-    _initializeNotifications();
     tz.initializeTimeZones();
+    _loadSavedSettings();
+    _initializeNotifications();
+    _initializeAudio();
   }
 
-  // 通知の初期化
   Future<void> _initializeNotifications() async {
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const iOSSettings = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
+    const AndroidInitializationSettings initializationSettingsAndroid =
+        AndroidInitializationSettings('@mipmap/ic_launcher');
+    final DarwinInitializationSettings initializationSettingsIOS =
+        DarwinInitializationSettings(
       requestSoundPermission: true,
+      requestBadgePermission: true,
+      requestAlertPermission: true,
     );
-    
-    const initializationSettings = InitializationSettings(
-      android: androidSettings,
-      iOS: iOSSettings,
+    final InitializationSettings initializationSettings = InitializationSettings(
+      android: initializationSettingsAndroid,
+      iOS: initializationSettingsIOS,
     );
-
-    await flutterLocalNotificationsPlugin.initialize(
-      initializationSettings,
-      onDidReceiveNotificationResponse: (NotificationResponse response) {
-        // 通知がタップされた時の処理
-      },
-    );
+    await flutterLocalNotificationsPlugin.initialize(initializationSettings);
   }
 
-  // アラームを設定する関数
-  Future<void> _scheduleAlarms() async {
-    // 既存のアラームをすべてキャンセル
-    await flutterLocalNotificationsPlugin.cancelAll();
+  Future<void> _initializeAudio() async {
+    await _audioPlayer.setAsset('assets/An_alarm_clock_that_would_not_startle_you.mp3');
+  }
 
-    // 各アラーム時刻に対して通知を設定
-    for (int i = 0; i < alarmTimes.length; i++) {
-      final time = alarmTimes[i];
-      final now = DateTime.now();
-      var scheduledDate = DateTime(
+  Future<void> _scheduleAlarms() async {
+    await flutterLocalNotificationsPlugin.cancelAll();
+    
+    final now = DateTime.now();
+    for (TimeOfDay alarmTime in alarmTimes) {
+      final dateTime = DateTime(
         now.year,
         now.month,
         now.day,
-        time.hour,
-        time.minute,
+        alarmTime.hour,
+        alarmTime.minute,
       );
-
-      // 設定時刻が過去の場合は翌日に設定
-      if (scheduledDate.isBefore(now)) {
-        scheduledDate = scheduledDate.add(const Duration(days: 1));
-      }
-
-      await _scheduleAlarm(i, scheduledDate);
+      
+      final int id = dateTime.millisecondsSinceEpoch ~/ 1000;
+      
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        'アラーム',
+        '起床時間です',
+        tz.TZDateTime.from(dateTime, tz.local),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'alarm_channel',
+            'Alarm Channel',
+            channelDescription: 'Channel for alarm notifications',
+            importance: Importance.max,
+            priority: Priority.high,
+            sound: RawResourceAndroidNotificationSound('an_alarm_clock_that_would_not_startle_you'),
+          ),
+          iOS: DarwinNotificationDetails(
+            sound: 'An_alarm_clock_that_would_not_startle_you.aiff',
+            presentSound: true,
+          ),
+        ),
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
     }
-  }
-
-  // 個別のアラームを設定
-  Future<void> _scheduleAlarm(int id, DateTime scheduledDate) async {
-    final androidDetails = AndroidNotificationDetails(
-      'alarm_channel',
-      'アラーム通知',
-      channelDescription: 'アラーム通知用のチャンネル',
-      importance: Importance.max,
-      priority: Priority.high,
-      sound: const RawResourceAndroidNotificationSound('alarm_sound'),
-      fullScreenIntent: true,
-    );
-
-    final iOSDetails = const DarwinNotificationDetails(
-      sound: 'alarm_sound.aiff',
-      presentAlert: true,
-      presentBadge: true,
-      presentSound: true,
-    );
-
-    final notificationDetails = NotificationDetails(
-      android: androidDetails,
-      iOS: iOSDetails,
-    );
-
-    await flutterLocalNotificationsPlugin.zonedSchedule(
-      id,
-      '目覚まし時計',
-      'アラーム時刻です',
-      tz.TZDateTime.from(scheduledDate, tz.local),
-      notificationDetails,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-    );
   }
 
   @override
@@ -137,65 +124,111 @@ class _MyHomePageState extends State<MyHomePage> {
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.blue,
-        title: Text(widget.title,
-            style: const TextStyle(
-                fontWeight: FontWeight.bold, color: Colors.white)),
+        title: Text(
+          _getDateString(),
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Center(
           child: Column(
             children: <Widget>[
-              ElevatedButton(
-                onPressed: () async {
-                  final TimeOfDay? picked = await showTimePicker(
-                    context: context,
-                    initialTime: TimeOfDay.now(),
-                  );
-                  if (picked != null) {
-                    setState(() {
-                      wakeUpTime = picked;
-                      generateAlarmTimes();
-                    });
-                  }
-                },
-                child: const Text('起床開始時刻を設定',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(height: 8),
-              if (wakeUpTime != null)
-                Text(
-                  '起床開始時刻: ${wakeUpTime!.format(context)}',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+              Container(
+                width: 200,
+                height: 75,
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(16.0),
                 ),
-              const SizedBox(height: 20),
-              ElevatedButton(
-                onPressed: () async {
-                  final TimeOfDay? picked = await showTimePicker(
-                    context: context,
-                    initialTime: wakeUpTime ?? TimeOfDay.now(),
-                  );
-                  if (picked != null) {
-                    if (wakeUpTime != null && isValidFinalTime(picked)) {
-                      setState(() {
-                        finalAlarmTime = picked;
-                        generateAlarmTimes();
-                      });
-                    } else {
-                      showInvalidTimeDialog();
-                    }
-                  }
-                },
-                child: const Text('最終アラーム時刻を設定',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(height: 8),
-              if (finalAlarmTime != null)
-                Text(
-                  '最終アラーム時刻: ${finalAlarmTime!.format(context)}',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+                child: StreamBuilder(
+                  stream: Stream.periodic(const Duration(seconds: 1)),
+                  builder: (context, snapshot) {
+                    return Center(
+                      child: Text(
+                        _getTimeString(),
+                        style: GoogleFonts.orbitron(
+                          fontSize: 50,
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    );
+                  },
                 ),
-              const SizedBox(height: 20),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Column(
+                    children: [
+                      ElevatedButton(
+                        onPressed: () async {
+                          final TimeOfDay? picked = await showTimePicker(
+                            context: context,
+                            initialTime: TimeOfDay.now(),
+                          );
+                          if (picked != null) {
+                            setState(() {
+                              wakeUpTime = picked;
+                              generateAlarmTimes();
+                            });
+                            await _saveSettings();
+                          }
+                        },
+                        child: const Text('起床開始時刻',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                      const SizedBox(width: 8),
+                      if (wakeUpTime != null)
+                        Text(
+                          wakeUpTime!.format(context),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 32),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(width: 24),
+                  Column(
+                    children: [
+                      ElevatedButton(
+                        onPressed: () async {
+                          final TimeOfDay? picked = await showTimePicker(
+                            context: context,
+                            initialTime: wakeUpTime ?? TimeOfDay.now(),
+                          );
+                          if (picked != null) {
+                            if (wakeUpTime != null &&
+                                isValidFinalTime(picked)) {
+                              setState(() {
+                                finalAlarmTime = picked;
+                                generateAlarmTimes();
+                              });
+                              await _saveSettings();
+                            } else {
+                              showInvalidTimeDialog();
+                            }
+                          }
+                        },
+                        child: const Text('最終アラーム時刻',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                      ),
+                      const SizedBox(width: 8),
+                      if (finalAlarmTime != null)
+                        Text(
+                          finalAlarmTime!.format(context),
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 32),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -208,12 +241,13 @@ class _MyHomePageState extends State<MyHomePage> {
                         child: Text('$value分'),
                       );
                     }).toList(),
-                    onChanged: (int? newValue) {
+                    onChanged: (int? newValue) async {
                       if (newValue != null) {
                         setState(() {
                           intervalMinutes = newValue;
                           generateAlarmTimes();
                         });
+                        await _saveSettings();
                       }
                     },
                   ),
@@ -299,7 +333,66 @@ class _MyHomePageState extends State<MyHomePage> {
       currentTime = currentTime.add(Duration(minutes: intervalMinutes));
     }
 
-    // アラーム時刻リスト生成後に通知をスケジュール
     _scheduleAlarms();
+  }
+
+  String _getDateString() {
+    final now = DateTime.now();
+    final weekDay = ['日', '月', '火', '水', '木', '金', '土'][now.weekday % 7];
+    return '${now.year}年${_formatNumber(now.month)}月${_formatNumber(now.day)}日(${weekDay})';
+  }
+
+  String _getTimeString() {
+    final now = DateTime.now();
+    return '${_formatNumber(now.hour)}:${_formatNumber(now.minute)}';
+  }
+
+  String _formatNumber(int number) {
+    return number.toString().padLeft(2, '0');
+  }
+
+  // 設定を読み込む
+  Future<void> _loadSavedSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final wakeUpHour = prefs.getInt(wakeUpHourKey);
+    final wakeUpMinute = prefs.getInt(wakeUpMinuteKey);
+    if (wakeUpHour != null && wakeUpMinute != null) {
+      setState(() {
+        wakeUpTime = TimeOfDay(hour: wakeUpHour, minute: wakeUpMinute);
+      });
+    }
+
+    final finalHour = prefs.getInt(finalAlarmHourKey);
+    final finalMinute = prefs.getInt(finalAlarmMinuteKey);
+    if (finalHour != null && finalMinute != null) {
+      setState(() {
+        finalAlarmTime = TimeOfDay(hour: finalHour, minute: finalMinute);
+      });
+    }
+
+    setState(() {
+      intervalMinutes = prefs.getInt(intervalMinutesKey) ?? 5;
+    });
+
+    if (wakeUpTime != null && finalAlarmTime != null) {
+      generateAlarmTimes();
+    }
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    if (wakeUpTime != null) {
+      await prefs.setInt(wakeUpHourKey, wakeUpTime!.hour);
+      await prefs.setInt(wakeUpMinuteKey, wakeUpTime!.minute);
+    }
+
+    if (finalAlarmTime != null) {
+      await prefs.setInt(finalAlarmHourKey, finalAlarmTime!.hour);
+      await prefs.setInt(finalAlarmMinuteKey, finalAlarmTime!.minute);
+    }
+
+    await prefs.setInt(intervalMinutesKey, intervalMinutes);
   }
 }
